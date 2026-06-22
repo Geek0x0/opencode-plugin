@@ -1,17 +1,43 @@
 {
-  "name": "request-counter",
-  "version": "0.5.0",
-  "description": "OpenCode plugin — shows LLM request count per session in sidebar",
+  "$schema": "https://json.schemastore.org/package.json",
+  "name": "opencode-llm-stats-sidebar",
+  "version": "1.0.0",
+  "description": "OpenCode TUI sidebar plugin for LLM request statistics",
   "type": "module",
-  "main": "./index.ts",
+  "main": "dist/index.js",
+  "author": "",
+  "license": "MIT",
+  "keywords": [
+    "opencode",
+    "opencode-plugin",
+    "sidebar",
+    "tui",
+    "llm",
+    "tokens",
+    "cost"
+  ],
+  "oc-plugin": [
+    "tui"
+  ],
   "exports": {
-    ".": "./index.ts",
-    "./tui": "./tui.ts"
+    ".": {
+      "import": "./dist/index.js"
+    },
+    "./tui": {
+      "import": "./dist/tui.js"
+    }
   },
-  "oc-plugin": ["tui"],
-  "dependencies": {
-    "@opentui/solid": "^0.1.97",
-    "solid-js": "^1.8.0"
+  "files": [
+    "dist",
+    "README.md"
+  ],
+  "peerDependencies": {
+    "@opencode-ai/plugin": ">=1.4.0",
+    "@opentui/solid": ">=0.1.0",
+    "solid-js": ">=1.8.0"
   },
-  "private": true
+  "engines": {
+    "bun": ">=1.1.0"
+  }
 }
+
