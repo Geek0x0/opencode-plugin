@@ -1,13 +1,9 @@
-import { watch } from "node:fs"
-import { readFile } from "node:fs/promises"
-import path from "node:path"
 import { createElement, insert, setProp } from "@opentui/solid"
 import { createSignal } from "solid-js"
 
-const PLUGIN_ID = "llm-stats-sidebar:tui"
-const POLL_INTERVAL_MS = 2000
+const PLUGIN_ID = "llm-call-count-sidebar:tui"
 const SLOT_ORDER = 860
-const WIDTH = 34
+const WIDTH = 28
 
 function element(tag, props, children = []) {
   const node = createElement(tag)
@@ -32,17 +28,6 @@ function renderText(value, color) {
   return text({ fg: color }, [truncate(String(value), WIDTH)])
 }
 
-function renderLine(label, value, theme) {
-  const left = `${label}:`
-  const right = String(value)
-  const gap = Math.max(1, WIDTH - left.length - right.length)
-  return renderText(`${left}${" ".repeat(gap)}${right}`, theme.text)
-}
-
-function renderMuted(value, theme) {
-  return renderText(value, theme.textMuted ?? theme.text)
-}
-
 function renderPanel(children) {
   return box(
     {
@@ -57,100 +42,118 @@ function renderPanel(children) {
   )
 }
 
-function renderSidebar(state, statePath, collapsed, toggleCollapsed, theme) {
-  const marker = collapsed ? "[+]" : "[-]"
-  const title = `${marker} LLM Requests (${formatInt(state.totalRequests || 0)})`
-  const header = box({ width: "100%", onMouseDown: toggleCollapsed }, [
-    renderText(title, theme.accent ?? theme.text),
+function renderSidebar(count, status, theme) {
+  return renderPanel([
+    renderText(`LLM Calls: ${formatInt(count)}`, theme.accent ?? theme.text),
+    status ? renderText(status, theme.textMuted ?? theme.text) : null,
   ])
-
-  if (collapsed) return renderPanel([header])
-
-  const topModel = Object.entries(state.byModel || {})
-    .sort((a, b) => (b[1].requests || 0) - (a[1].requests || 0))
-    .at(0)
-
-  const lines = [
-    header,
-    renderLine("active", formatInt((state.activeSessions || []).length), theme),
-    renderLine("errors", formatInt(state.errors || 0), theme),
-    renderLine("in tok", formatInt(state.inputTokens || 0), theme),
-    renderLine("out tok", formatInt(state.outputTokens || 0), theme),
-    renderLine("total", formatInt(state.totalTokens || 0), theme),
-    renderLine("cost", formatCost(state.totalCost || 0), theme),
-    renderMuted("", theme),
-    renderMuted("top model", theme),
-    renderMuted(topModel ? `${topModel[0]} (${topModel[1].requests || 0})` : "none yet", theme),
-    renderMuted("", theme),
-    renderMuted("recent", theme),
-    ...renderRecent(state.recent || [], theme),
-    renderMuted("", theme),
-    renderMuted(shortPath(statePath), theme),
-  ]
-
-  return renderPanel(lines)
 }
 
-function renderRecent(recent, theme) {
-  if (recent.length === 0) return [renderMuted("no requests yet", theme)]
-
-  return recent.slice(0, 4).map((item) => {
-    const model = item.model || "unknown"
-    const tokens = formatInt(item.tokens || 0)
-    return renderMuted(`${formatTime(item.time)} ${model} ${tokens}`, theme)
-  })
+function normalizeEvent(input) {
+  if (!input) return undefined
+  if (input.event) return input.event
+  return input
 }
 
-async function loadState(statePath) {
-  const fallback = {
-    totalRequests: 0,
-    inputTokens: 0,
-    outputTokens: 0,
-    totalTokens: 0,
-    totalCost: 0,
-    errors: 0,
-    activeSessions: [],
-    byModel: {},
-    recent: [],
+function eventPayload(event) {
+  return event?.properties || event?.data || event?.payload || event
+}
+
+function countKey(event) {
+  const type = event?.type || ""
+  const payload = eventPayload(event)
+
+  if (type === "message.part.updated") {
+    const part = payload?.part || payload
+    if (!part || typeof part !== "object") return ""
+
+    const looksLikeFinish =
+      part.type === "step-finish" ||
+      part.type === "step.finish" ||
+      part.type === "finish" ||
+      Boolean(part.usage)
+
+    if (!looksLikeFinish) return ""
+    return stringKey(part.sessionID, part.messageID, part.id)
   }
 
-  try {
-    const text = await readFile(statePath, "utf8")
-    return { ...fallback, ...JSON.parse(text) }
-  } catch {
-    return fallback
-  }
-}
+  if (type === "message.updated") {
+    const message = payload?.info || payload?.message || payload
+    const role = message?.role || message?.type || message?.info?.role || message?.info?.type
+    if (role !== "assistant") return ""
 
-function resolveStatePath() {
-  const root =
-    process.env.OPENCODE_WORKTREE ||
-    process.env.OPENCODE_DIRECTORY ||
-    process.env.PWD ||
-    process.cwd()
-  return path.join(root, ".opencode", "llm-request-stats.json")
-}
-
-function registerWatcher(statePath, reload) {
-  const timers = []
-  const watchers = []
-
-  timers.push(setInterval(reload, POLL_INTERVAL_MS))
-
-  try {
-    watchers.push(
-      watch(path.dirname(statePath), { persistent: false }, (_event, filename) => {
-        if (!filename || String(filename) === path.basename(statePath)) reload()
-      }),
+    return stringKey(
+      message?.sessionID || message?.info?.sessionID || payload?.sessionID,
+      message?.id || message?.messageID || message?.info?.id || message?.info?.messageID,
+      "",
     )
-  } catch {
-    // Polling still keeps the sidebar fresh if the directory does not exist yet.
   }
 
-  return () => {
-    for (const timer of timers) clearInterval(timer)
-    for (const watcher of watchers) watcher.close()
+  return ""
+}
+
+function stringKey(sessionID, messageID, fallbackID) {
+  const session = typeof sessionID === "string" ? sessionID : "session"
+  const message = typeof messageID === "string" ? messageID : ""
+  const fallback = typeof fallbackID === "string" ? fallbackID : ""
+  if (!message && !fallback) return ""
+  return `${session}:${message || fallback}`
+}
+
+function subscribeToEvents(api, onEvent) {
+  const unsubscribers = []
+  const directCandidates = [
+    api?.event?.subscribe,
+    api?.events?.subscribe,
+    api?.bus?.subscribe,
+    api?.tui?.events?.subscribe,
+  ].filter((candidate) => typeof candidate === "function")
+
+  for (const subscribe of directCandidates) {
+    const unsubscribe = trySubscribe(subscribe, onEvent)
+    if (unsubscribe) unsubscribers.push(unsubscribe)
   }
+
+  const clientSubscribe = api?.client?.event?.subscribe
+  if (typeof clientSubscribe === "function") {
+    const unsubscribe = trySubscribe(clientSubscribe, onEvent)
+    if (unsubscribe) unsubscribers.push(unsubscribe)
+  }
+
+  if (unsubscribers.length === 0) return undefined
+  return () => {
+    for (const unsubscribe of unsubscribers) {
+      try {
+        unsubscribe()
+      } catch {
+        // Best-effort cleanup.
+      }
+    }
+  }
+}
+
+function trySubscribe(subscribe, onEvent) {
+  const callback = (input) => onEvent(normalizeEvent(input))
+
+  try {
+    return normalizeUnsubscribe(subscribe(callback))
+  } catch {
+    // Some APIs use an options object.
+  }
+
+  try {
+    return normalizeUnsubscribe(subscribe({ event: callback, onEvent: callback, callback }))
+  } catch {
+    return undefined
+  }
+}
+
+function normalizeUnsubscribe(result) {
+  if (typeof result === "function") return result
+  if (result && typeof result.unsubscribe === "function") return () => result.unsubscribe()
+  if (result && typeof result.dispose === "function") return () => result.dispose()
+  if (result && typeof result.close === "function") return () => result.close()
+  return undefined
 }
 
 function truncate(value, width) {
@@ -159,47 +162,34 @@ function truncate(value, width) {
   return `${value.slice(0, width - 1)}.`
 }
 
-function shortPath(value) {
-  const marker = ".opencode/"
-  const index = value.lastIndexOf(marker)
-  return index >= 0 ? value.slice(index) : value
-}
-
 function formatInt(value) {
   return Math.round(Number(value || 0)).toLocaleString()
-}
-
-function formatCost(value) {
-  const cost = Number(value || 0)
-  if (!cost) return "$0.0000"
-  if (cost < 0.01) return `$${cost.toFixed(5)}`
-  return `$${cost.toFixed(3)}`
-}
-
-function formatTime(value) {
-  if (!value) return "--:--"
-  return new Date(value).toLocaleTimeString()
 }
 
 const plugin = {
   id: PLUGIN_ID,
   tui: async (api) => {
-    const statePath = resolveStatePath()
-    const [getState, setState] = createSignal(await loadState(statePath))
-    const [isCollapsed, setCollapsed] = createSignal(false)
-
+    const seen = new Set()
+    const [getCount, setCount] = createSignal(0)
+    const [getStatus, setStatus] = createSignal("")
     const requestRender = () => api.renderer.requestRender()
-    const reload = () => {
-      void loadState(statePath).then((next) => {
-        setState(next)
-        requestRender()
-      })
+
+    const unsubscribe = subscribeToEvents(api, (event) => {
+      const key = countKey(event)
+      if (!key || seen.has(key)) return
+
+      seen.add(key)
+      setCount(getCount() + 1)
+      setStatus("")
+      requestRender()
+    })
+
+    if (!unsubscribe) {
+      setStatus("event api unavailable")
     }
 
-    const disposeWatcher = registerWatcher(statePath, reload)
-
     api.lifecycle.onDispose(() => {
-      disposeWatcher()
+      if (unsubscribe) unsubscribe()
     })
 
     api.slots.register({
@@ -208,20 +198,11 @@ const plugin = {
         sidebar_content: () => {
           try {
             const theme = api.theme.current || {}
-            return renderSidebar(
-              getState(),
-              statePath,
-              isCollapsed(),
-              () => {
-                setCollapsed(!isCollapsed())
-                requestRender()
-              },
-              theme,
-            )
+            return renderSidebar(getCount(), getStatus(), theme)
           } catch (error) {
             const theme = api.theme.current || {}
             return box({ width: "100%" }, [
-              text({ fg: theme.error ?? theme.text }, [`llm-stats render error: ${String(error).slice(0, 60)}`]),
+              text({ fg: theme.error ?? theme.text }, [`llm-count render error: ${String(error).slice(0, 60)}`]),
             ])
           }
         },
@@ -231,3 +212,4 @@ const plugin = {
 }
 
 export default plugin
+
