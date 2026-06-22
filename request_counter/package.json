@@ -1,0 +1,13 @@
+{
+  "name": "request-counter",
+  "version": "0.5.0",
+  "description": "OpenCode plugin — shows LLM request count per session in sidebar",
+  "type": "module",
+  "main": "./index.ts",
+  "exports": {
+    ".": "./index.ts",
+    "./tui": "./tui.ts"
+  },
+  "oc-plugin": ["tui"],
+  "private": true
+}
